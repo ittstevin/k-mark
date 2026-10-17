@@ -3,25 +3,13 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useState, useSyncExternalStore } from "react";
+import Brand from "./brand";
 import ListingCard from "./listing-card";
+import SearchControls from "./search-controls";
 import { categoryOptions, listings } from "../data/listings";
 import type { ListingCategory } from "../data/listings";
 
 type CategoryFilter = ListingCategory | "All categories";
-
-const locations = [
-  "All locations",
-  "Nairobi",
-  "Kiambu",
-  "Westlands",
-  "Kilimani",
-  "Kasarani",
-  "Roysambu",
-  "Thika",
-  "Ruiru",
-  "Kiambu Town",
-  "Kikuyu",
-];
 
 const emptyFavorites: string[] = [];
 let favoriteSnapshot: string[] | null = null;
@@ -101,6 +89,12 @@ export default function Marketplace() {
     document.getElementById("listings")?.scrollIntoView({ behavior: "smooth" });
   }
 
+  function clearFilters() {
+    setCategory("All categories");
+    setLocation("All locations");
+    setQuery("");
+  }
+
   function renderListingGrid(items: typeof visibleListings) {
     return (
       <div className="listing-grid">
@@ -120,10 +114,7 @@ export default function Marketplace() {
     <>
       <header className="site-header">
         <div className="header-inner">
-          <Link className="brand" href="/" aria-label="K-Mark home">
-            <span className="brand-mark" aria-hidden="true">K</span>
-            <span className="brand-name">K-Mark</span>
-          </Link>
+          <Brand />
           <nav className="main-nav" aria-label="Main navigation">
             <Link href="/#categories">Explore</Link>
             <Link href="/#listings">Marketplace</Link>
@@ -147,38 +138,12 @@ export default function Marketplace() {
               <p className="hero-description">
                 Buy and sell pre-loved finds, everyday essentials and more around Nairobi and Kiambu.
               </p>
-              <form className="search-form" onSubmit={(event) => event.preventDefault()}>
-                <label className="search-field">
-                  <span className="search-icon" aria-hidden="true">⌕</span>
-                  <span className="sr-only">Search listings</span>
-                  <input
-                    type="search"
-                    placeholder="What are you looking for?"
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                  />
-                  {query && (
-                    <button
-                      className="clear-search"
-                      type="button"
-                      aria-label="Clear search"
-                      onClick={() => setQuery("")}
-                    >
-                      ×
-                    </button>
-                  )}
-                </label>
-                <label className="location-field">
-                  <span className="location-icon" aria-hidden="true">⌖</span>
-                  <span className="sr-only">Filter by location</span>
-                  <select value={location} onChange={(event) => setLocation(event.target.value)}>
-                    {locations.map((place) => <option key={place}>{place}</option>)}
-                  </select>
-                </label>
-                <button className="search-submit" type="submit" aria-label="Search listings">
-                  Search
-                </button>
-              </form>
+              <SearchControls
+                query={query}
+                onQueryChange={setQuery}
+                location={location}
+                onLocationChange={setLocation}
+              />
               <p className="search-note">A better way to find what you need, right around the corner.</p>
             </div>
             <div className="hero-visual">
@@ -238,7 +203,7 @@ export default function Marketplace() {
               <p className="eyebrow">THE GOOD STUFF, CLOSE BY</p>
               <h2 id="listings-title">A few good finds</h2>
             </div>
-            <span className="result-count">{visibleListings.length} local finds</span>
+            <span className="result-count" aria-live="polite">{visibleListings.length} local finds</span>
           </div>
 
           {(category !== "All categories" || location !== "All locations" || query) && (
@@ -247,12 +212,11 @@ export default function Marketplace() {
                 {location !== "All locations" ? ` in ${location}` : ""}
                 {query ? ` matching “${query}”` : ""}
               </span>
-              <button
-                type="button"
-                onClick={() => { setCategory("All categories"); setLocation("All locations"); setQuery(""); }}
-              >
-                Clear filters <span aria-hidden="true">×</span>
-              </button>
+              {visibleListings.length > 0 && (
+                <button type="button" onClick={clearFilters}>
+                  Clear filters <span aria-hidden="true">×</span>
+                </button>
+              )}
             </div>
           )}
 
@@ -264,7 +228,7 @@ export default function Marketplace() {
               <button
                 className="button button-dark"
                 type="button"
-                onClick={() => { setCategory("All categories"); setLocation("All locations"); setQuery(""); }}
+                onClick={clearFilters}
               >
                 Clear filters
               </button>
@@ -306,9 +270,7 @@ export default function Marketplace() {
       <footer className="site-footer">
         <div className="footer-main">
           <div className="footer-brand-block">
-            <Link className="brand footer-brand" href="/">
-              <span className="brand-mark" aria-hidden="true">K</span><span className="brand-name">K-Mark</span>
-            </Link>
+            <Brand className="footer-brand" />
             <p>Buy. Sell. Connect.<br />Good finds, closer to home.</p>
           </div>
           <div className="footer-column"><h2>Discover</h2><Link href="/#categories">Browse categories</Link><Link href="/#listings">Recent finds</Link><Link href="/sell">Sell an item</Link></div>

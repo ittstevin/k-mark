@@ -1,5 +1,7 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import Brand from "../../components/brand";
 import DetailImage from "../../components/detail-image";
 import { listings } from "../../data/listings";
 
@@ -7,9 +9,19 @@ export function generateStaticParams() {
   return listings.map((listing) => ({ slug: listing.slug }));
 }
 
-export default async function ListingPage({
+export default function ListingPage({
   params,
 }: PageProps<"/listings/[slug]">) {
+  return (
+    <Suspense fallback={<main className="detail-page"><p>Loading this find…</p></main>}>
+      <ListingContent params={params} />
+    </Suspense>
+  );
+}
+
+async function ListingContent({
+  params,
+}: { params: PageProps<"/listings/[slug]">["params"] }) {
   const { slug } = await params;
   const listing = listings.find((item) => item.slug === slug);
 
@@ -18,10 +30,7 @@ export default async function ListingPage({
   return (
     <main className="detail-page">
       <div className="detail-topbar">
-        <Link className="brand" href="/" aria-label="K-Mark home">
-          <span className="brand-mark" aria-hidden="true">K</span>
-          <span className="brand-name">K-Mark</span>
-        </Link>
+        <Brand />
         <Link className="detail-back-link" href="/#listings">← Back to finds</Link>
       </div>
       <article className="detail-layout">

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import Brand from "./brand";
 
 type ComingSoonProps = {
   eyebrow: string;
@@ -10,10 +11,7 @@ export default function ComingSoon({ eyebrow, title, message }: ComingSoonProps)
   return (
     <main className="placeholder-page">
       <div className="placeholder-panel">
-        <Link className="brand" href="/" aria-label="K-Mark home">
-          <span className="brand-mark" aria-hidden="true">K</span>
-          <span className="brand-name">K-Mark</span>
-        </Link>
+        <Brand />
         <p className="eyebrow placeholder-eyebrow">{eyebrow}</p>
         <h1>{title}</h1>
         <p className="placeholder-message">{message}</p>
