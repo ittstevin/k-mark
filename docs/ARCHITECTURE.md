@@ -1,6 +1,6 @@
 # K-Mark Backend Architecture
 
-Status: approved MVP plan, documentation only. The frontend remains a local-data prototype; no Supabase project, API, migration, or environment configuration has been added.
+Status: initial local-only database foundation drafted; migrations/tests have not been applied or executed because Supabase CLI, Docker, and psql are unavailable here. The frontend remains a local-data prototype. No hosted Supabase project has been created or changed.
 
 ## Existing Application
 
@@ -9,7 +9,7 @@ Status: approved MVP plan, documentation only. The frontend remains a local-data
 - **Mock data/types:** `app/data/listings.ts` exports `Listing`, `ListingCategory`, `categoryOptions`, and `listings`.
 - **Reusable UI:** `ListingCard`, `SearchControls`, `Brand`, `DetailImage`, `ComingSoon`, and the `Marketplace` client component.
 - **Current state:** search/filters use the local array; favourites use `sessionStorage`; auth and selling routes are placeholders.
-- **Backend:** no Supabase package/config, SQL, API route handler, `.env` file, Auth client, or database exists. No test script is configured.
+- **Backend:** local Supabase config, SQL migrations, seeds, and pgTAP files are now present. No Supabase package, API route handler, `.env` file, Auth client, or applied database exists. No app test script is configured.
 
 ## Request and Authorization Flow
 
@@ -41,9 +41,11 @@ Future public configuration names: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPA
 
 New listings are drafts. Sellers submit drafts into review; only a moderator can approve them. Content edits to an active/paused listing immediately hide it and require review again. Sellers may pause/resume unchanged approved listings and mark their own listings sold. A moderator removal cannot be undone by a seller; moderator restore returns a listing to paused.
 
-Use a private `listing-staging` bucket for all drafts and pending-review images. Enforce a per-object 5 MB limit (exactly 5,000,000 bytes) and JPEG/PNG/WebP allow-list in bucket configuration and server validation. Validate file signatures and decode/re-encode server-side, strip EXIF/GPS, generate random object paths under the authenticated user's and listing's UUIDs, and enforce at most eight images under a listing lock. Storage RLS checks ownership and permissible listing state for upload/delete.
+Use a private `listing-staging` bucket for all drafts and pending-review images. Enforce a per-object 5 MB limit (exactly 5,000,000 bytes) and JPEG/PNG/WebP allow-list in bucket configuration and server validation. Validate file signatures and decode/re-encode server-side, strip EXIF/GPS, generate random object paths under the authenticated user's and listing's UUIDs, and enforce at most eight images under a listing lock. No minimum image count is required for submission. Storage RLS checks ownership and permissible listing state for upload/delete.
 
-After moderator approval, a trusted server operation copies validated staging images to random paths in public `listing-images` and verifies all copies. The final database function accepts only a recorded moderator approval event, confirms the complete image set, and atomically records the public paths and activates the listing; an arbitrary authenticated caller cannot activate an `approved` row. A failure leaves it non-public; retries are idempotent and delete orphan copies. Public image bytes are intentionally public only after approval. Hiding a listing removes public references and starts object cleanup; public images already downloaded or shared cannot be recalled instantly. Keep staging sources only as long as needed for retries, then delete them.
+After moderator approval, a trusted server operation copies validated staging images to random paths in public `listing-images` and verifies all copies. The final database function accepts only a recorded moderator approval event, confirms the complete image set, and atomically records the public paths and activates the listing; an arbitrary authenticated caller cannot activate an `approved` row. A failure leaves it non-public; retries are idempotent and delete orphan copies. Public image bytes are intentionally public only after approval. Previously downloaded or shared bytes cannot be recalled instantly.
+
+On moderator removal, take the listing offline first, copy its public photos into verified private archive paths, then remove the public objects. Keep the private copies for moderator restoration; restore returns the listing to `paused`, and seller resume republishes the unchanged approved content. Any edit requires review again. The archive has no automatic expiry until a retention/cost policy is approved; expose a moderator-only purge path for a later policy. Never delete the only verified copy during a partial failure.
 
 ## Local, Staging, Production, and Operations
 
@@ -57,10 +59,13 @@ After moderator approval, a trusted server operation copies validated staging im
 ## Migration and Test Sequence
 
 1. Confirm remaining policy assumptions listed in `SECURITY.md`.
-2. Migration 1: enums, locations/categories, profiles, listings, image metadata, favorites, reports, moderation roles/events, constraints, indexes, and idempotent profile provisioning.
-3. Migration 2: non-exposed private schema, fixed-search-path role helper, protected listing/moderator functions, explicit table/column/function grants, and RLS policies.
-4. Migration 3: private staging/public approved-image buckets, bucket size/MIME limits, and `storage.objects` ownership/read policies.
-5. Migration 4: seed the current seven categories and controlled Nairobi/Kiambu areas; keep seed operations repeatable.
-6. Add pgTAP RLS/grant tests with each relevant migration. Add server validation/integration tests for signup profile creation, listing workflow, media publication/cleanup, and Auth deletion. Only connect UI reads after local tests pass; add writes after staging security review.
+2. `20261018000100_core_schema.sql`: enums, locations/categories/profiles/listings/images/favorites/reports, private roles/audits/reservations/cleanup queue, indexes, and atomic profile provisioning.
+3. `20261018000200_grants_and_rls.sql`: explicit table/column grants, RLS policies, private role/profile helpers, and restricted Storage object policies.
+4. `20261018000300_storage_policies_and_reservations.sql`: owner-scoped upload/archive reservations and trusted upload-completion boundary.
+5. `20261018000400_lifecycle_functions.sql`: seller and moderator transitions, image publication/archive, report review, protected function grants.
+6. `supabase/seed.sql`: idempotent categories and controlled Nairobi/Kiambu locations, applied after migrations by `supabase db reset`.
+7. pgTAP files under `supabase/tests/database/` test grants/RLS and critical lifecycle/storage actions. Add separate server integration tests for actual image-byte decoding, Auth profile provisioning, cleanup-worker retries, and account deletion before those application services are built. Only connect UI reads after local database tests pass.
+
+This database-only milestone does not implement a Storage byte-validation endpoint/service-role client, scheduled cleanup worker, moderator-account provisioning procedure, or account-deletion workflow. `complete_listing_image_upload` is granted only to `service_role`; future server code must validate image bytes before calling it. No service key, Auth secret, or legal report-retention duration is included. SQL is unverified until the local Supabase stack runs.
 
 No payments, messaging, orders, or live Supabase integration are part of this MVP plan.

@@ -1,6 +1,6 @@
 # K-Mark Database Design
 
-Status: approved MVP design, still documentation only. It is not migration SQL. No Supabase project or database has been configured and no schema has been created.
+Status: initial local-only schema/migrations are drafted under `supabase/`, but have not been applied or tested because the Supabase CLI, Docker, and PostgreSQL client are unavailable in the current environment. No hosted project has been created or changed.
 
 ## Current Data Model
 
@@ -68,10 +68,9 @@ Seed the seven existing categories. Keep icons in frontend configuration keyed b
 - `alt_text text not null` with a length bound.
 - `sort_order integer not null check (sort_order between 0 and 7)`.
 - `created_at`; `unique (listing_id, sort_order)` (defer the constraint during reorder transactions if needed).
+- A check requires exactly one of `staging_path` or `published_path` to be present.
 
-The eight-image maximum is a cross-row limit, so enforce it in the upload server operation/database function while locking the listing; test concurrent attempts. `staging_path` names an object in the private staging bucket. `published_path` is populated only after moderator approval and successful publication. Return image metadata to the public only for active listings. The first ordered image is the cover.
-
-The product has not set a minimum image count for submission. Confirm whether a listing needs at least one image before review; if so, enforce that in the submit function as well as the UI.
+The eight-image maximum is a cross-row limit, so enforce it in the upload server operation/database function while locking the listing; test concurrent attempts. No minimum image count is required for MVP submission. `staging_path` names an object in the private staging bucket and may be cleared only after a verified public copy is recorded in `published_path`. A check requires at least one path to be present. Return image metadata to the public only for active listings. The first ordered image is the cover.
 
 ### `favorites`
 
@@ -98,6 +97,8 @@ In a non-exposed `private` schema, add:
 
 - `moderator_roles(user_id uuid primary key references auth.users(id) on delete cascade, granted_by uuid null references auth.users(id) on delete set null, created_at timestamptz not null, revoked_at timestamptz null)`. No client role receives table access or mutation grants. Only a trusted operator provisions/revokes roles.
 - `listing_moderation_events(id uuid primary key, listing_id uuid not null references listings(id) on delete restrict, moderator_user_id uuid null references auth.users(id) on delete set null, action text not null, reason text null, created_at timestamptz not null)`. No public or seller read access; use this for review/rejection/removal/restoration audit.
+- `image_upload_reservations` tracks user/listing/path, purpose, image order/alt text, expiry, and completion. The eight-image cap counts attached images plus unexpired reservations while the listing row is locked.
+- `storage_cleanup_queue` uniquely queues `(bucket_id, object_name)` with reason, attempts, last error code, and completion time. It is private and idempotent; a future server worker processes it.
 
 Moderator checks use a private helper with `SECURITY DEFINER`, fixed `SET search_path = ''`, fully schema-qualified references, and execute permission revoked from `PUBLIC`/`anon` and granted only as required to `authenticated`. Mutation functions repeat the moderator check; knowing a function name or reaching a hidden page grants nothing.
 
@@ -118,8 +119,8 @@ Moderator checks use a private helper with `SECURITY DEFINER`, fixed `SET search
 | `paused` | Seller resumes unchanged listing | `active` | Public again; no new approval because content is unchanged. |
 | `active` or `paused` | Seller changes title, description, price, category, location, or images | `pending_review` | Immediately hidden; reapproval required. Seller can instead save edits as `draft`. |
 | `active` or `paused` | Seller marks sold | `sold` | Not in public browse; terminal for seller. |
-| `active`, `paused`, or `sold` | Moderator removes | `removed` | Hidden; seller cannot restore or edit around removal. |
-| `removed` | Moderator restores | `paused` | Not public until seller resumes; restoration is audited. |
+| `active`, `paused`, or `sold` | Moderator removes | `removed` | Hidden; copy public images to verified private archive paths before deleting public objects. Seller cannot restore or edit around removal. |
+| `removed` | Moderator restores | `paused` | Not public until seller resumes; archived images remain private. Restoration is audited. |
 
 All other transitions are denied. In particular, sellers cannot set `approved`, `active` after rejection/removal, `removed`, reviewer IDs, or moderation-event fields. The final `approved -> active` function must verify a recorded moderator approval event and a complete verified published-image set; merely knowing/calling the RPC cannot activate a listing. Database mutation functions enforce transitions under a row lock; Server Actions also validate for good errors, but are not the security boundary. Hard deletion is limited to an unsubmitted draft with no report/audit references and always triggers retryable image cleanup.
 
@@ -131,14 +132,16 @@ Deletion is a controlled server-side workflow: take all owned listings offline (
 
 ## Storage Publication and Cleanup
 
-Use a private `listing-staging` bucket with a 5 MB limit defined exactly as 5,000,000 bytes, JPEG/PNG/WebP allow-list, and no public reads. Object paths are generated server-side as `<auth-user-uuid>/<listing-uuid>/<random-uuid>.<extension>`. Storage RLS verifies the path owner and the listing seller/status; only the owner can upload/delete staging objects for their own draft/pending listing. A transaction-locked server operation caps each listing at eight images.
+Use a private `listing-staging` bucket with a 5 MB limit defined exactly as 5,000,000 bytes, JPEG/PNG/WebP allow-list, and no public reads. It stores draft/pending uploads and private archive copies of removed listings' photos. Object paths are generated server-side as `<auth-user-uuid>/<listing-uuid>/<random-uuid>.<extension>`; trusted archive copies use the same owner's listing namespace. Storage RLS verifies the path owner and listing state; only the owner can upload/delete staging objects for their own draft/pending listing, while archive objects are accessible only to the checked restore/cleanup functions. A transaction-locked server operation caps each listing at eight images.
 
-On moderator approval, a trusted server operation validates the approved set, copies each object to a random path in the public `listing-images` bucket, verifies every copy, and then atomically publishes the paths and sets the listing active. Until approval, paths exist only in the private bucket. Do not return public paths before activation. If copying or final database update fails, keep the listing non-public, retry safely, and delete orphaned public copies. Public images are intentionally public after approval; removing/hiding a listing withdraws database references and starts deletion of public copies, but already downloaded/shared URLs cannot be recalled instantly.
+On moderator approval, a trusted server operation validates the approved set, copies each object to a random path in the public `listing-images` bucket, verifies every copy, and then atomically publishes the paths and sets the listing active. Until approval, paths exist only in the private bucket. Do not return public paths before activation. If copying or final database update fails, keep the listing non-public, retry safely, and delete orphaned public copies. Public images are intentionally public after approval; previously downloaded/shared bytes cannot be recalled instantly.
+
+On moderator removal, first set the listing non-public, then copy each published image to a private archive path and verify the copy before deleting its public object. Store the new private path in `staging_path` and clear `published_path`. If any copy fails, keep retry state and never delete the only verified copy. A moderator restore returns the listing to `paused` with archived images still private; the seller may resume unchanged previously approved content, at which point the publication function re-publishes those archived images. Any content/image edit instead requires a new review. Do not automatically expire removal archives until an approved retention/cost policy exists.
 
 Cleanup is idempotent and retryable:
 
 - Delete abandoned staging uploads after a short documented grace period by a scheduled trusted job.
-- On draft deletion, listing removal, image replacement, or account deletion, enqueue deletion from both buckets; do not expect a Postgres cascade to delete Storage objects.
+- On draft deletion, image replacement, or account deletion, enqueue deletion from both buckets; do not expect a Postgres cascade to delete Storage objects. Listing removal archives, rather than deletes, image bytes; moderator-authorized purge can delete an archive after the case/retention decision.
 - Keep private audit/report data only for a verified retention interval. Alert/retry failed cleanup rather than widening bucket access.
 
 ## Indexes and Search
