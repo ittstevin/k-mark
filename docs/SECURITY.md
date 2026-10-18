@@ -1,79 +1,96 @@
 # K-Mark Security Design
 
-Status: design only. These controls are requirements for a future backend; none of them should be treated as active in the current mock frontend.
+Status: approved MVP security requirements, documentation only. None are active in the mock frontend; no migration or live project has been changed.
 
 ## Security Boundaries
 
-- Treat browser input, listing text, image files, URL parameters, and all client state as untrusted.
-- The Supabase publishable key is an identifier, not an authorization mechanism. RLS and least-privilege Postgres grants must protect every exposed table.
-- RLS does not remove SQL grants. Each migration must revoke unnecessary `anon`/`authenticated` privileges, grant only required operations, then add operation-specific policies.
-- Keep profile email and Auth credentials in `auth.users`; public `profiles` contains only fields intended for every visitor. Never expose session tokens, database credentials, or service/secret keys to the browser.
+- Treat all browser input, images, URL values, and client state as untrusted.
+- Every exposed table has RLS enabled and explicit least-privilege grants. RLS does not remove grants; do not rely on policies alone.
+- Server Actions provide validation and user-friendly errors, not authorization. Ownership, status transitions, and moderation are enforced again in database functions/RLS so direct PostgREST calls cannot bypass them.
+- Keep email in Supabase Auth. Public profile projections contain only display name and broad controlled location. Never include phone, exact address, account secrets, or report data in public listing queries.
+- The publishable key is not a secret and grants no authority without policy; secret/service keys bypass RLS and are not used for normal user operations.
 
-## Authorization Policy Matrix
+## Roles and Moderator Capability
 
-Enable RLS for every exposed public table. Policies below are the intended behavior, not executable policy SQL.
+Postgres request roles remain `anon` and `authenticated`; “seller” and “moderator” are capabilities of an authenticated user, not client-selected roles. Store moderator membership in `private.moderator_roles`, outside exposed API schemas. Only a trusted operator can provision or revoke a role; never accept a role from a form, profile, URL, or user-editable Auth metadata.
 
-| Table | Signed-out visitor | Signed-in owner/reporter | Other signed-in user | Trusted moderation |
-| --- | --- | --- | --- | --- |
-| `profiles` | Read public fields only | Read/update own public fields | Read public fields; cannot update another profile | Restricted server operation only if needed |
-| `categories` | Read active categories | Read active categories | Read active categories | Manage through migrations/trusted tooling |
-| `listings` | Read `active` rows only | Read own rows in every status; create own `draft`; edit own allowed content | Read `active` rows only | May remove/restore only through controlled moderation path |
-| `listing_images` | Read image metadata for active listings | Read/manage images for own listings | Read metadata for active listings | Cleanup/moderation as needed |
-| `favorites` | No access | Read/insert/delete rows where `user_id = auth.uid()` | No access to another user's rows | No routine access needed |
-| `reports` | No access | Insert reports as self; read only own submitted reports | No access to another reporter's reports | Read/review through a restricted server-side path |
+RLS/functions call `private.is_moderator()` to check `auth.uid()` against that table. The helper and privileged mutation functions use `SECURITY DEFINER` only where needed, set `search_path = ''`, fully qualify every object, avoid dynamic SQL, and revoke `EXECUTE` from `PUBLIC` and `anon`. Grant function execution only to `authenticated`; each function still verifies the caller, moderator capability, input, row, and legal transition. Keep the `private` schema unexposed. Hidden admin UI is never authorization.
 
-For policies, name the Postgres role (`anon` or `authenticated`) and use `auth.uid()` for ownership. On `listings`, the public `active` read and the seller-owned read are separate SELECT policies; remember permissive policies combine with OR. Insert checks must bind seller/reporter IDs to `auth.uid()`. Update policies need both `USING` and `WITH CHECK` so ownership cannot be reassigned. Add tests proving both allowed and denied cases.
+## Grants and RLS Permissions Matrix
 
-### Table-specific constraints
+RLS is enabled on all listed API tables. Unless noted, `anon` and `authenticated` receive no direct mutation grants on privileged data. Function grants are separate from table grants.
 
-- **Profiles:** expose only deliberately public fields. Owner edits cannot change `id`, ownership, or timestamps. Do not copy Auth email into this table. If phone contact is later required, place it in a separate private table with owner-only policies and explicit consent.
-- **Listings:** anonymous users see only `status = 'active'`. Sellers can read their own drafts/paused/sold/removed rows. A seller can never set `seller_id` to another account. Use column-level grants or a narrow server function so ordinary updates cannot change IDs, audit timestamps, or moderation-controlled state. Use a status-transition function/action for publish, pause, sold, and remove operations.
-- **Listing images:** parent listing ownership determines writes. Require the referenced listing to belong to `auth.uid()` for insert/update/delete. The listing SELECT policy must not depend on `listing_images`, avoiding recursive RLS checks.
-- **Favourites:** allow only the row owner to select, insert, or delete; do not expose a global favourite list or private favourite count. An insert should reference an active listing. Use the composite key to prevent duplicates.
-- **Reports:** require `reporter_id = auth.uid()` and exactly one target. Reporter may read their own report, but cannot update/delete it or read another person's report. A reported seller must never see reporter identity or private report details. Only a trusted moderation path changes report status.
-- **Categories:** client roles receive read-only access to active rows. Do not allow user metadata or a user-editable profile field to grant category-management privileges.
+| Table | Role | Table/column grant | RLS/operation rule |
+| --- | --- | --- | --- |
+| `profiles` | `anon`, `authenticated` | `SELECT` only on public profile columns | Public display name and broad location only; profile projection contains no email/private fields. |
+| `profiles` | `authenticated` owner | `UPDATE(display_name, location_id)` only; no `INSERT`, `DELETE`, ID/Auth-link or timestamp writes | `USING` and `WITH CHECK` require `auth_user_id = auth.uid()` and non-anonymized profile. Signup trigger creates row. |
+| `categories`, `locations` | `anon`, `authenticated` | `SELECT` only | Read active rows only. No client `INSERT/UPDATE/DELETE`; migrations/trusted operator seed changes. |
+| `listings` | `anon`, `authenticated` | `SELECT` only; no direct `INSERT/UPDATE/DELETE` or protected-column grants | `anon` sees active rows only. `authenticated` sees active rows plus rows whose seller profile maps to `auth.uid()`. |
+| `listings` | `authenticated` seller | `EXECUTE` on seller mutation functions only | Each function verifies `auth.uid()` owns row, locks it, validates input and transition. No client can write `seller_profile_id`, `status`, IDs, approval/audit values, or timestamps directly. |
+| `listings` | `authenticated` moderator | Same function-level grant, no direct table writes | Moderator functions check `private.is_moderator()` and write a moderation event. Non-moderator calls fail even if invoked directly. |
+| `listing_images` | `anon`, `authenticated` | `SELECT(id, listing_id, alt_text, sort_order, published_path)` only | RLS exposes active listing images to all and own image metadata to its seller. Never grant `staging_path` to API roles. |
+| `listing_images` | `authenticated` owner/moderator | `EXECUTE` on checked image attach/remove/publish functions | Function verifies parent ownership or moderator capability, path, ordering, and eight-image count. |
+| `favorites` | `anon` | No table grants | No server-side anonymous favourite data. Browser session favourites remain local. |
+| `favorites` | `authenticated` | `SELECT`, `INSERT`, `DELETE`; no `UPDATE` | Every operation requires `user_id = auth.uid()`. Insert also requires an active listing. Composite primary key prevents duplicates. |
+| `reports` | `anon` | No table grants | No access. |
+| `reports` | `authenticated` reporter | `SELECT`, `INSERT`; no `UPDATE/DELETE` | Read only own report rows; insert `reporter_user_id` must equal `auth.uid()` and exactly one target must exist. |
+| `reports` | `authenticated` moderator | `EXECUTE` on review function only | Review function checks moderator capability and writes private audit; no reporter/target access via ordinary client query. |
+| `private.moderator_roles`, `private.listing_moderation_events` | `anon`, `authenticated` | No table grants | No Data API exposure. Role changes are operator-only; moderation functions can append audit rows. |
+| `storage.objects` in `listing-staging` | `anon` | No grants/policies | No object reads, writes, or listings. |
+| `storage.objects` in `listing-staging` | `authenticated` owner | `SELECT`, `INSERT`, `DELETE` only as needed; no arbitrary `UPDATE/upsert` | RLS checks authenticated UUID path prefix and ownership/state of the parent listing. Size/type are separately enforced by bucket and server validation. |
+| `storage.objects` in public `listing-images` | `anon`, `authenticated` | Public object `GET` only; no object-listing or write grants | Public bucket reads are inherently public after approval. Only trusted publication/cleanup can create/delete objects; use random paths and do not expose them before activation. |
 
-Supabase documents that secret/service keys bypass RLS. Use them only in a narrowly scoped server-only moderation or cleanup module; never pass a user JWT into an admin client and assume it bypasses RLS. Prefer the signed-in user's server client for ordinary reads and writes so RLS remains active.
+At migration time, revoke default table/function privileges from `PUBLIC`, `anon`, and `authenticated`, then grant only the operations in the matrix. Use explicit column grants for public profile fields. Keep `USING` and `WITH CHECK` aligned; permissive SELECT policies combine with OR. A public active-listing policy must not expose owner-only moderation fields. Do not create a view that bypasses RLS; any exposed view must be security-invoker and separately reviewed.
 
-## Authentication and Session Handling
+## Listing Lifecycle Enforcement
 
-- Use Supabase Auth email OTP/magic link initially; do not create a custom password table.
-- Use `@supabase/ssr` cookie-aware clients and the Next.js 16 `proxy.ts` convention for refreshing sessions. Verify identity with `auth.getClaims()` or use `auth.getUser()` when a current user record is needed. `getSession()` alone reads cookie state and is not sufficient authorization proof.
-- Do not trust `user_metadata` for ownership, roles, moderation status, or other authorization decisions; users can edit it. Derive ownership from verified `auth.uid()`.
-- Restrict Auth redirect URLs to the local/production hosts actually in use. Set secure, HTTP-only cookie behavior through the supported SSR integration and avoid shared caching of responses that contain refreshed session cookies.
-- Public env values may use `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`. A server secret such as `SUPABASE_SECRET_KEY` is optional, server-only, and never prefixed `NEXT_PUBLIC_`. Do not create values or `.env` files for this documentation task.
+See the canonical state-transition table in [DATABASE.md, “Listing State-Transition Table”](DATABASE.md#listing-state-transition-table). Essential rules:
 
-## Server-Side Validation
+- `draft -> pending_review` is seller submission; only moderator approval can begin publication.
+- `approved` is a non-public state while approved media is copied and verified. A restricted publication function alone changes it to `active`.
+- Only `active` rows are public. Seller content edits to active/paused rows immediately return them to review and hide them.
+- Seller pause/resume/sold functions require ownership. Sellers cannot reject, approve, remove, restore, or rewrite protected fields.
+- Moderator removal sets `removed`; only a moderator can restore, and restoration returns the listing to `paused`, not directly to public `active`.
+- Row locks and transition checks prevent races and replaying stale approvals. A moderation audit row records actor, action, reason, and time.
 
-Every Server Action/Route Handler must validate input before it calls Supabase. RLS is an authorization backstop, not a replacement for validation.
+## Private Images and Publication
 
-- Accept only expected object shapes; reject unknown/missing fields where appropriate, normalize whitespace, and enforce title/description/reason length bounds.
-- Parse price as a safe integer number of KSh, reject negative, non-finite, or out-of-range values, and never use floating-point currency math.
-- Resolve `category_id` from an active category row; validate county against Nairobi/Kiambu and area as bounded text or an approved location list.
-- Generate slugs and storage paths on the server. Ignore client-supplied `seller_id`, `reporter_id`, status, moderation fields, timestamps, Storage URLs, and ownership claims.
-- Enforce listing status transitions and ownership in both the server operation and database policy/function.
-- Rate-limit Auth, listing creation, reports, and uploads at the server/edge before launch. Return generic public errors that do not leak whether a private user/listing/report exists.
+- `listing-staging` is private; draft and pending-review bytes are not publicly readable. Storage RLS permits upload/delete only when path user UUID equals `auth.uid()` and the parent listing belongs to that user in an uploadable state.
+- Enforce a 5 MB maximum (exactly 5,000,000 bytes) and JPEG/PNG/WebP at bucket settings and server validation. Inspect file signatures and decode/re-encode to reject spoofed types, malformed images, SVG/HTML, and embedded EXIF/GPS. Do not trust a browser MIME header.
+- Limit to eight images per listing in a locked database/server operation. Use random server-generated object keys; clients cannot supply bucket paths or overwrite another user's object.
+- After explicit moderator approval, copy to random paths in public `listing-images`; verify all copies before the publication function records paths and marks the listing active. If any step fails, leave it non-public and run idempotent cleanup. Public bucket URLs are public by design; unpublished source files remain only in the private bucket.
+- Pausing, selling, removing, replacing, and account deletion withdraw public metadata and enqueue object deletion. Previously shared/downloaded public bytes cannot be recalled instantly; state this clearly in product privacy terms. Delete abandoned staging uploads after a documented grace period.
 
-No validation package is currently installed. Choose a schema validator during implementation only if it materially reduces duplication; do not install one as part of this architecture plan.
+## Authentication, Profile Provisioning, and Account Deletion
 
-## Image Upload Controls
+- Use Supabase Auth email OTP/magic link and `@supabase/ssr` request-specific clients. Next.js 16 uses `proxy.ts` for refresh. Verify server identity with `getClaims()` or `getUser()`; `getSession()` alone is not a server authorization check.
+- Signup's Auth-user trigger creates a minimal profile atomically with a safe default display name and incomplete-onboarding marker. Trigger failure rolls back signup; onboarding is idempotent/retryable. Never trust signup metadata for permissions.
+- `profiles.auth_user_id` references `auth.users` with `ON DELETE SET NULL`; listings reference stable profile UUIDs with `ON DELETE RESTRICT`. A server-side deletion workflow first takes listings offline, deletes favourites/revokes moderator membership, anonymizes the retained profile, removes media, then deletes the Auth account. Report Auth/profile FKs use `SET NULL` so report evidence can survive without a live identity. Do not physically remove referenced profile tombstones.
+- Retain only necessary report evidence for a period confirmed against applicable Kenyan legal/privacy requirements. The period and exact evidence fields remain unresolved; obtain qualified advice before launch and publish the retention/deletion policy.
+- Keep Auth redirect allow-lists exact and prevent shared caching of responses with refreshed cookies. Secrets belong only in encrypted host settings/local ignored env files; do not commit them. Do not create env files for this plan.
 
-- Use a single public `listing-images` bucket only for images intended to be publicly visible. Public bucket reads are public by design; Storage RLS still protects write operations, not confidentiality of a public object URL.
-- Use per-user/per-listing random object paths. Storage RLS must verify `auth.uid()` matches the first path segment and that the referenced listing belongs to that user. Do not allow arbitrary bucket writes or cross-user overwrites.
-- Restrict MIME types and file size in both bucket configuration and server validation. Inspect actual file signatures rather than trusting filename or browser MIME alone; reject SVG/HTML and strip EXIF/GPS metadata.
-- Limit the image count per listing and verify every image metadata row belongs to the listing. Clean up unreferenced objects with retryable server-side work; database cascades do not remove Storage files.
-- Never put private documents, home addresses, or phone numbers in public listing images or metadata.
+## Input Validation and Low-Cost Controls
 
-## Reporting, Moderation, and Privacy
+Validate in every Server Action before database calls, then enforce invariants again in functions/constraints:
 
-- Reports are immutable to the reporter after submission and inaccessible to the public/reported user. Store only the minimum detail required to review a report and define retention/deletion rules before launch.
-- Do not add a user-editable `is_admin` boolean. If a moderator role is introduced, set it only through trusted server-side Auth app metadata or a tightly controlled private role mechanism, and account for claim refresh. For the initial small system, a restricted server-only moderation operation is simpler than building a public admin-role table.
-- Soft-remove listings so a report can still reference the target. Account deletion must first handle owned listings and report retention deliberately; do not cascade-delete evidence accidentally.
-- Do not add payments, financial credentials, messaging content, or order data to this schema.
+- Require expected object shapes; trim and length-bound title (100) and description (5,000).
+- Parse `price_kes` as an integer in `[0, 100000000]`; this fits safely in JavaScript's integer range.
+- Resolve active `category_id` and `location_id` server-side. County/area come from controlled Nairobi/Kiambu location rows, not arbitrary text.
+- Generate slug and random storage paths server-side; ignore supplied seller/reporter IDs, role, listing status, moderation fields, timestamps, and object URLs.
+- Rate-limit sign-in, submissions, reports, and uploads with the hosting/Supabase facilities available to the selected plan. Do not add a paid queue or validation dependency without demonstrated need.
 
-## Required Verification Before Launch
+## Required Security Tests
 
-For every exposed table, write pgTAP RLS tests for anonymous, owner, another authenticated user, and trusted moderation as applicable. Test both grants and row policies; one does not replace the other. Include ownership reassignment, hidden listing reads, report privacy, favourite isolation, and storage path attacks. Test validation with malformed IDs, oversized text, invalid prices/categories, forged status/seller fields, unexpected file types, oversized uploads, duplicate images, and rate-limit behavior.
+Run pgTAP with local Supabase before connecting the UI. Every exposed table test asserts RLS is enabled and grants are least-privilege. Include:
+
+- Anonymous reads only active listings, active categories/locations, and public profile columns; no private report/favourite/draft/image access.
+- Owner can create draft, submit, edit own permitted fields, pause/resume/sell, and cannot write another seller's row.
+- Direct table/API attempts to forge owner IDs, UUIDs, status, approval, moderation, or timestamps fail; all invalid transitions fail, including seller approval and removed-listing restoration.
+- Moderator can approve/reject/remove/restore; ordinary authenticated users cannot invoke those operations successfully. Role revocation takes effect according to the chosen role lookup design.
+- Favourites: owner-only select/insert/delete, no duplicate pair, no inactive listing insert, and cross-user read/delete denial.
+- Reports: reporter-only read, immutable reporter writes, exactly one existing target, private reporter identity, moderator-only review, and FK behavior on account/target deletion.
+- Storage: owner path allowed; cross-user/listing path denied; draft bytes unreadable anonymously; only approved publication creates public paths; test 8/9 image boundary, MIME/signature mismatch, 5,000,000/5,000,001-byte files, overwrite/delete, and cleanup retry.
+- Signup trigger atomicity/idempotency; deletion anonymization and all FK actions; validation boundaries and rate limits.
 
 Official references:
 

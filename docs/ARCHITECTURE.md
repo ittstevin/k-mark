@@ -1,75 +1,66 @@
 # K-Mark Backend Architecture
 
-Status: planning document. The frontend remains a local-data prototype. No backend, Supabase project, API, migrations, or environment configuration has been added.
+Status: approved MVP plan, documentation only. The frontend remains a local-data prototype; no Supabase project, API, migration, or environment configuration has been added.
 
 ## Existing Application
 
-- **Framework:** Next.js 16.4.2 App Router, React 19, TypeScript, Tailwind CSS 4.
-- **Package manager:** npm (`package-lock.json`).
-- **Routes:** `/`, `/listings/[slug]`, `/sign-in`, `/sell`, and `/help`.
-- **Mock data and view types:** `app/data/listings.ts` exports `Listing`, `ListingCategory`, `categoryOptions`, and `listings`.
-- **Reusable UI:** `app/components/marketplace.tsx`, `listing-card.tsx`, `search-controls.tsx`, `brand.tsx`, `detail-image.tsx`, and `coming-soon.tsx`.
-- **Current state:** Search/filtering runs in the browser over the mock array; favourites are held in `sessionStorage`. Sign-in and selling are placeholders.
-- **Backend configuration:** No Supabase packages, Supabase directory, SQL, API route handlers, `.env` files, Auth client, or database config exists. `package.json` has no test script.
+- **Framework:** Next.js 16.4.2 App Router, React 19, TypeScript, Tailwind CSS 4; npm package manager.
+- **Routes:** `/`, `/listings/[slug]`, `/sign-in`, `/sell`, `/help`.
+- **Mock data/types:** `app/data/listings.ts` exports `Listing`, `ListingCategory`, `categoryOptions`, and `listings`.
+- **Reusable UI:** `ListingCard`, `SearchControls`, `Brand`, `DetailImage`, `ComingSoon`, and the `Marketplace` client component.
+- **Current state:** search/filters use the local array; favourites use `sessionStorage`; auth and selling routes are placeholders.
+- **Backend:** no Supabase package/config, SQL, API route handler, `.env` file, Auth client, or database exists. No test script is configured.
 
-## Target Request/Data Flow
+## Request and Authorization Flow
 
-1. Keep the App Router and Server Components as the default.
-2. Public page/detail reads use a request-scoped Supabase server client and rely on database RLS. The `/listings/[slug]` route queries only a public `active` listing and returns not-found for hidden rows unless the verified seller is viewing their own listing.
-3. Use Next.js Server Actions for form mutations such as profile edits, listing create/edit/status changes, report submission, and favourite changes. Add a Route Handler only where a protocol boundary needs one, such as a signed upload grant or external webhook.
-4. Validate every mutation on the server, derive `user_id`/`seller_id` from verified Auth claims, and let RLS enforce the same ownership rule in the database.
-5. Keep browser-only interactions small. The existing cards and filters can receive serializable view data from a Server Component; do not move database secrets or privileged clients into their client bundle.
-
-### Proposed future structure
-
-```text
-app/
-  actions/                  # validated user mutations
-  lib/supabase/client.ts    # browser client, only if a client-side feature needs it
-  lib/supabase/server.ts    # request-scoped server client
-  proxy.ts                  # refreshes cookie-backed Auth sessions (Next.js 16)
-  data/listings.ts          # keep as demo fixture or replace with a query adapter
-supabase/
-  migrations/               # reviewed schema, grants, RLS and seed changes
-  tests/                    # pgTAP RLS allow/deny tests
-```
-
-Keep this structure prospective; do not create it until implementation is approved. Do not add a generic repository layer until there is real query duplication to remove.
+1. Keep App Router Server Components as the default. Use the browser only for UI state.
+2. Create one cookie-aware server client per request. Public search/detail queries return only `status = 'active'` listings and their deliberately public profile fields. A seller's dashboard may query their rows of any status after verified authorization.
+3. Use Server Actions for validation and friendly errors, but never treat the action or a hidden route as the authorization boundary. Exposed tables have least-privilege grants and RLS. Listing state changes and moderator decisions go through database functions that check `auth.uid()`, role, row ownership, and legal transitions under a row lock. Direct PostgREST calls to those functions must face the same checks.
+4. For highly restricted operations, use `SECURITY DEFINER` functions only with `SET search_path = ''`, fully qualified object names, no dynamic SQL, and `EXECUTE` revoked from `PUBLIC`/`anon`; grant only the needed function to `authenticated`. Moderator functions also call the private moderator-role helper. Keep the helper/role table in a non-exposed schema.
+5. Keep signed-in favourites in `favorites`; anonymous favorites may remain local. Explicitly validate any session-favourite merge after sign-in.
 
 ## Reuse Existing Frontend Work
 
-- Keep `ListingCard` as a presentation component. Add a server-side mapper from `listings`, `categories`, `profiles`, and the cover `listing_images` row into a UI view model.
-- Map database `price_kes` to the card's KSh `price`; map category ID/slug to its display name; map ordered image paths to the current image/alt fields; derive the relative `posted` label from `created_at`.
-- The demo `id` values such as `camera-01` are not UUIDs. Use database UUIDs for persistence and the existing `slug` for `/listings/[slug]` URLs.
-- Keep category icon choices in frontend configuration keyed by category slug. The current `categoryOptions` array becomes a seed/fixture or is replaced by active database categories.
-- Preserve anonymous search and filter interactions. Replace the array source with paginated server results, keeping the same controls and empty-state view.
-- Replace session-only signed-in favourites with `favorites` rows. Anonymous session favourites can remain local; make any sign-in merge explicit.
-- Do not store mock-only `emoji`, display-relative timestamps, seller demo labels, or a seller-editable `featured` flag as authoritative database fields.
+- Keep `ListingCard` as a presentation component. A server mapper converts database listing/category/location/profile/image rows to its view model.
+- Map UUID `id` to a string; keep `slug` for `/listings/[slug]`; map `price_kes` integer to KSh; map `category_id` and `location_id` to display name/county/area; select images ordered by `sort_order`; derive relative `posted` from `created_at`.
+- Demo IDs such as `camera-01` are not database UUIDs. Never use them as persistent IDs. Keep emoji, image fallback, category icons, and relative timestamp formatting in UI code.
+- The current `ListingCategory` union and `categoryOptions` are useful display/seed fixtures, not authorization. Use active database categories for filtering after integration.
+- Keep existing card/filter interfaces and empty states; replace the array source with a paginated server query. Start with category/location/date filtering; full-text search can wait until measured need.
 
-## Authentication and Supabase Clients
+## Auth, Profile Provisioning, and Roles
 
-- Start with Supabase Auth email OTP/magic link; do not build custom password storage. Confirm redirect allow-lists and production callback URLs before launch.
-- Use `@supabase/ssr` clients for Next.js App Router cookie sessions and `@supabase/supabase-js` as the underlying client. These dependencies are not installed now.
-- Next.js 16 calls the session-refresh file `proxy.ts`, not `middleware.ts`. Use the current official Supabase SSR pattern; refresh cookies in Proxy and return the response that carries refreshed cookies/cache headers.
-- Verify identity server-side with `supabase.auth.getClaims()` (or `getUser()` when a fresh Auth user record is required). Do not authorize using `getSession()` alone or user-editable `user_metadata`.
-- A publishable key and project URL may be exposed to the browser only with RLS correctly enabled. An optional Supabase secret/service key must be server-only and limited to trusted moderation/cleanup paths; normal user requests should use their cookie-authenticated client.
+- Use Supabase Auth email OTP/magic link; do not store passwords. Configure exact local/staging/production callback allow-lists.
+- Use `@supabase/ssr` with `@supabase/supabase-js`; these packages are not installed. Next.js 16 uses `proxy.ts` for cookie refresh. Use the current SSR cookie adapter, preserve refreshed cookies/cache headers, and prevent shared caching of session-bearing responses.
+- Verify identity server-side with `getClaims()` or `getUser()` as appropriate. `getSession()` alone is not authorization proof. Ignore client role claims and user-editable `user_metadata`.
+- Create a minimal profile using an idempotent `auth.users` insert trigger in the same transaction. Use a validated display name or a safe default and mark onboarding incomplete. If profile creation fails, let signup roll back; provide a retryable authenticated onboarding action. Metadata never grants roles.
+- Moderator membership is stored in private `moderator_roles`, provisioned/revoked only by a trusted operator. Direct table access is revoked. Do not use a hidden admin page or client-supplied role as proof.
 
-Expected variable names when integration is approved: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and, only if a trusted server task needs it, `SUPABASE_SECRET_KEY`. No values belong in source control; no variables are needed by the current frontend.
+Future public configuration names: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`. A server-only `SUPABASE_SECRET_KEY` is not needed for normal user operations and should only exist if a narrowly scoped trusted maintenance function requires it. No values or `.env` files are introduced by this plan.
 
-## Image Storage
+## Listing Publication and Images
 
-Use one `listing-images` Storage bucket and `listing_images` rows that store bucket-relative paths. Suggested object names are `<auth-user-uuid>/<listing-uuid>/<random-uuid>.<extension>`. Storage policies must confirm the signed-in user owns the referenced listing before upload, overwrite, or delete. Restrict content type and size; accept a small raster set such as JPEG, PNG, and WebP, reject SVG/HTML, and strip EXIF/GPS metadata before public delivery.
+New listings are drafts. Sellers submit drafts into review; only a moderator can approve them. Content edits to an active/paused listing immediately hide it and require review again. Sellers may pause/resume unchanged approved listings and mark their own listings sold. A moderator removal cannot be undone by a seller; moderator restore returns a listing to paused.
 
-Listing photographs are intentionally public marketplace content. A public bucket makes image bytes readable to anyone with a URL, including for a draft if its path leaks; never place identity documents, contact details, or private images in it. If drafts must have confidential images, use a private bucket and server-issued signed reads instead. Removing a database row does not automatically delete its Storage object, so implement retryable cleanup.
+Use a private `listing-staging` bucket for all drafts and pending-review images. Enforce a per-object 5 MB limit (exactly 5,000,000 bytes) and JPEG/PNG/WebP allow-list in bucket configuration and server validation. Validate file signatures and decode/re-encode server-side, strip EXIF/GPS, generate random object paths under the authenticated user's and listing's UUIDs, and enforce at most eight images under a listing lock. Storage RLS checks ownership and permissible listing state for upload/delete.
 
-## Implementation Sequence
+After moderator approval, a trusted server operation copies validated staging images to random paths in public `listing-images` and verifies all copies. The final database function accepts only a recorded moderator approval event, confirms the complete image set, and atomically records the public paths and activates the listing; an arbitrary authenticated caller cannot activate an `approved` row. A failure leaves it non-public; retries are idempotent and delete orphan copies. Public image bytes are intentionally public only after approval. Hiding a listing removes public references and starts object cleanup; public images already downloaded or shared cannot be recalled instantly. Keep staging sources only as long as needed for retries, then delete them.
 
-1. Review this proposal and confirm product choices: email OTP, direct publishing after server validation versus manual review, profile fields, image limits, retention, and the initial moderator workflow.
-2. Add Supabase CLI/local development setup only after approval; create ordered migrations for tables, constraints, indexes, minimal grants, RLS, and category seeds. Do not create or mutate a hosted project as part of this plan.
-3. Add pgTAP tests for every table and Storage policy. Test anonymous, owner, other-user, and moderator cases before connecting the UI.
-4. Add environment validation and cookie-aware browser/server clients plus Next.js 16 `proxy.ts`. Keep secrets out of client imports and test cache headers/session refresh.
-5. Add read-only server queries and map rows to the existing UI view model. Replace mock listing reads without changing card/filter interaction contracts.
-6. Add Auth, then validated listing/favourite/report Server Actions and owner-scoped image upload. Keep publishing, moderation, and account deletion state transitions explicit.
-7. Test RLS, validation, Auth redirects, upload abuse cases, accessibility, and mobile browse flows in local Supabase before any production rollout.
+## Local, Staging, Production, and Operations
 
-No payments, orders, messaging, or database integration is proposed for this foundation.
+- Use Supabase CLI/local Postgres for development and pgTAP tests; do not develop against production.
+- Use separate local, staging, and production projects with distinct project URLs/keys, Auth callback allow-lists, Storage buckets, and data. Never copy production personal data to local/staging.
+- Keep secrets in ignored local environment files for development and the deployment provider's encrypted secret store for hosted environments. Rotate exposed keys; never commit service/secret keys. Publish only URL and publishable key to the browser after RLS is verified.
+- Commit ordered migrations and category/location seed data. Promotion is local tests -> staging migration and policy tests -> review -> production migration. Do not make undocumented dashboard-only schema edits.
+- Before production migrations, take/verify a backup appropriate to the chosen Supabase plan. Document who can restore, test recovery in staging, and take a fresh backup before destructive schema/data changes. Confirm retention/PITR availability and cost with the selected plan; do not assume it is included.
+- Keep early hosting low-cost: Supabase Auth/Postgres/Storage and the current Next.js host are sufficient. Avoid a separate search service, message queue, paid moderation platform, or extra validation package until a measured requirement justifies it.
+
+## Migration and Test Sequence
+
+1. Confirm remaining policy assumptions listed in `SECURITY.md`.
+2. Migration 1: enums, locations/categories, profiles, listings, image metadata, favorites, reports, moderation roles/events, constraints, indexes, and idempotent profile provisioning.
+3. Migration 2: non-exposed private schema, fixed-search-path role helper, protected listing/moderator functions, explicit table/column/function grants, and RLS policies.
+4. Migration 3: private staging/public approved-image buckets, bucket size/MIME limits, and `storage.objects` ownership/read policies.
+5. Migration 4: seed the current seven categories and controlled Nairobi/Kiambu areas; keep seed operations repeatable.
+6. Add pgTAP RLS/grant tests with each relevant migration. Add server validation/integration tests for signup profile creation, listing workflow, media publication/cleanup, and Auth deletion. Only connect UI reads after local tests pass; add writes after staging security review.
+
+No payments, messaging, orders, or live Supabase integration are part of this MVP plan.
