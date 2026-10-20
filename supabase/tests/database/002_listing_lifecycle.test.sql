@@ -90,7 +90,7 @@ set local request.jwt.claim.sub = '30000000-0000-4000-8000-000000000002';
 select throws_ok(
   $$select public.pause_listing('40000000-0000-4000-8000-000000000003')$$,
   '42501', null,
-  'another seller cannot pause the owner's listing'
+  'another seller cannot pause the owner listing'
 );
 select throws_ok(
   $$select public.moderator_decide_listing('40000000-0000-4000-8000-000000000002', 'approve', 'forged')$$,

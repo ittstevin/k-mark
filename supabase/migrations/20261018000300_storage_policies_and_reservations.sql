@@ -4,6 +4,28 @@ alter default privileges in schema private revoke execute on functions from publ
 grant select on storage.objects to anon, authenticated;
 grant insert on storage.objects to authenticated;
 
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values
+  (
+    'listing-staging',
+    'listing-staging',
+    false,
+    5000000,
+    array['image/jpeg', 'image/png', 'image/webp']::text[]
+  ),
+  (
+    'listing-images',
+    'listing-images',
+    true,
+    5000000,
+    array['image/jpeg', 'image/png', 'image/webp']::text[]
+  )
+on conflict (id) do update
+set
+  public = excluded.public,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+
 create function private.can_read_staging_object(p_name text)
 returns boolean
 language plpgsql
@@ -70,6 +92,7 @@ revoke all on function private.can_insert_staging_object(text) from public, anon
 grant execute on function private.can_read_staging_object(text) to authenticated;
 grant execute on function private.can_insert_staging_object(text) to authenticated;
 
+create policy listing_staging_select
 on storage.objects for select to authenticated
 using (bucket_id = 'listing-staging' and private.can_read_staging_object(name));
 

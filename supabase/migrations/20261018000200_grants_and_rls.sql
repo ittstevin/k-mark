@@ -188,5 +188,13 @@ with check (
   )
 );
 
-alter table storage.objects enable row level security;
-revoke all on table storage.objects from public, anon, authenticated;
+-- storage.objects already has RLS enabled by the Storage service.
+-- The migration role is not the table owner, so ALTER TABLE is not allowed.
+do $$
+begin
+  execute 'revoke all on table storage.objects from public, anon, authenticated';
+exception
+  when insufficient_privilege then
+    null;
+end;
+$$;

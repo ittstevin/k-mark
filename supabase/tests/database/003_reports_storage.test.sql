@@ -42,9 +42,11 @@ select lives_ok(
       reporter_user_id, reporter_profile_id, target_listing_id,
       target_reference_snapshot, reason, details
     )
-    select auth.uid(), p.id, '60000000-0000-4000-8000-000000000001',
+    values (
+      auth.uid(), private.current_profile_id(),
+      '60000000-0000-4000-8000-000000000001',
       '60000000-0000-4000-8000-000000000001', 'misleading', 'Test report details'
-    from public.profiles p where p.auth_user_id = auth.uid()$$,
+    )$$,
   'reporter can create a report against a listing'
 );
 
@@ -57,7 +59,7 @@ select throws_ok(
   $$insert into public.reports (reporter_user_id, reporter_profile_id, target_listing_id, target_reference_snapshot, reason)
     values (
       '50000000-0000-4000-8000-000000000003',
-      (select id from public.profiles where auth_user_id = auth.uid()),
+      private.current_profile_id(),
       '60000000-0000-4000-8000-000000000001',
       '60000000-0000-4000-8000-000000000001', 'other'
     )$$,
@@ -148,7 +150,7 @@ values (
 );
 reset role;
 
-set local role service_role;
+set local role authenticated;
 set local request.jwt.claim.sub = '50000000-0000-4000-8000-000000000001';
 select throws_ok(
   $$select public.complete_listing_image_upload(current_setting('test.image_path'))$$,
